@@ -1,6 +1,6 @@
-# AGG — A Levelling System Based Discord Bot
+# Animaxia — A Levelling System Based Discord Bot
 
-AGG is a lightweight and extensible **Discord bot** built using **Discord.js**.  
+Animaxia is a lightweight and extensible **Discord bot** built using **Discord.js**.  
 It features a levelling system that rewards user activity and encourages community engagement within the server.
 
 ---
@@ -29,8 +29,8 @@ It features a levelling system that rewards user activity and encourages communi
 ### Clone the repository
 
 ```bash
-git clone https://github.com/neerajcli/agg.git
-cd agg
+git clone https://github.com/neerajcli/animaxia.git
+cd animaxia
 ```
 
 ### Install dependencies
