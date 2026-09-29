@@ -20,7 +20,7 @@ It features a levelling system that rewards user activity and encourages communi
 
 - **Node.js v20**
 - **Discord.js v14**
-- **Quick.db v9**
+- **Mongoose v8**
 
 ---
 
