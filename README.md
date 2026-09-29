@@ -57,12 +57,12 @@ cd animaxia
 npm install
 ```
 
-### Add the config in index.js
+### Add the config values in index.js
 
 ```js
-DISCORD_TOKEN=your_bot_token_here
-MONGODB_URI=your_mongodb_connection_string
-TOPGG_WEBHOOK_SECRET=your_topgg_webhook_secret
+const DISCORD_TOKEN = "YOUR BOT TOKEN HERE";
+const MONGODB_URI = "MONGODB CONNECTION STRING HERE";
+const TOPGG_WEBHOOK_SECRET = "TOPGG SECRET HERE";
 ```
 
 All three are required - the bot checks for them on startup and exits with an error if any are missing, so you'll know right away if something's unset. `TOPGG_WEBHOOK_SECRET` is only used by the vote webhook; if you're not using top.gg voting, set it to any placeholder value.
