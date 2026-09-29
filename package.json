@@ -1,0 +1,14 @@
+{
+  "name": "AGG",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "canvas": "^2.11.2",
+    "discord.js": "^14.15.3",
+    "express": "^4.22.2",
+    "mongoose": "^8.24.4",
+    "parse-ms": "^4.0.0"
+  }
+}
