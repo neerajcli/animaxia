@@ -39,10 +39,12 @@ cd animaxia
 npm install
 ```
 
-### Add the bot token in `index.js`
+### Add the config details in `index.js`
 
 ```js
-client.login('Your Bot TOKEN here')
+const DISCORD_TOKEN = "YOUR BOT TOKEN HERE";
+const MONGODB_URI = "MONGODB CONNECTION STRING HERE";
+const TOPGG_WEBHOOK_SECRET = "TOPGG SECRET HERE";
 ```
 
 ### Start the bot
