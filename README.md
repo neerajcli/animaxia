@@ -90,7 +90,7 @@ node index.js
 | `!reset @user` | Admin | Resets a user's level and XP |
 | `!enable-boost` / `!disable-boost` | Admin | Toggles the 3x XP boost event |
 | `!cleanupleaderboard` | Admin | Removes leaderboard entries for users no longer in the server |
-| `!eval <code>` | Bot owner only | Runs raw JS in the bot's process — see Security Notes |
+| `!eval <code>` | Bot owner only | Runs raw JS in the bot's process - see Security Notes |
 
 ### Tournaments
 
