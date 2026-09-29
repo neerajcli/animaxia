@@ -49,6 +49,11 @@ const activeVCUsers = new Map();
 const guildInvites = new Map();
 const INVITE_TRACK_GUILD_ID = '498898363350253569';
 const INVITE_LOG_CHANNEL_ID = '522005174076833792';
+const PREFIX = "!";
+const EMBED_COLOR = 0x9b5cff;
+const TOURNAMENT_ORGANISER_ROLE_ID = "778855335632699432";
+const EMBED_DESCRIPTION_LIMIT = 3500;
+const guildLocks = new Map();
 
 let cachedBackground = null;
 let xpInterval = null;
@@ -71,8 +76,55 @@ const guildSettingsSchema = new mongoose.Schema({
     ghostPingEnabled: { type: Boolean, default: false }
 }, { versionKey: false });
 
+const matchSchema = new mongoose.Schema({
+    id: { type: String, required: true },
+    tournamentId: { type: String, required: true },
+    round: { type: Number, required: true },
+    player1: { type: String, default: null },
+    player2: { type: String, default: null },
+    winner: { type: String, default: null },
+    status: { type: String, enum: ["pending", "completed"], default: "pending" },
+    resultType: { type: String, default: null },
+    createdAt: { type: Number, default: () => Date.now() },
+    completedAt: { type: Number, default: null }
+}, { _id: false });
+
+const tournamentSchema = new mongoose.Schema({
+    id: { type: String, required: true },
+    guildId: { type: String, required: true },
+    name: { type: String, required: true },
+    channelId: { type: String, default: null },
+    hostId: { type: String, required: true },
+    maxPlayers: { type: Number, required: true },
+    players: { type: [String], default: [] },
+    disqualified: { type: [String], default: [] },
+    matches: { type: [matchSchema], default: [] },
+    currentRound: { type: Number, default: 0 },
+    winner: { type: String, default: null },
+    status: {
+        type: String,
+        enum: ["registration", "registration_closed", "active", "completed", "cancelled"],
+        default: "registration"
+    },
+    createdAt: { type: Number, default: () => Date.now() },
+    startedAt: { type: Number, default: null },
+    completedAt: { type: Number, default: null },
+    cancelledAt: { type: Number, default: null }
+}, { versionKey: false });
+
+tournamentSchema.index({ guildId: 1, id: 1 }, { unique: true });
+tournamentSchema.index({ guildId: 1, status: 1 });
+tournamentSchema.index({ guildId: 1, "matches.id": 1 });
+
+const counterSchema = new mongoose.Schema({
+    _id: { type: String },
+    seq: { type: Number, default: 0 }
+}, { versionKey: false });
+
 const UserStats = mongoose.model("UserStats", userStatsSchema);
 const GuildSettings = mongoose.model("GuildSettings", guildSettingsSchema);
+const Tournament = mongoose.model("Tournament", tournamentSchema);
+const Counter = mongoose.model("Counter", counterSchema);
 
 async function ensureUserInitialized(userId, guildId) {
     await UserStats.updateOne(
@@ -116,19 +168,823 @@ async function getLeaderboard(guildId) {
     return stats.map(s => ({ userId: s.userId, xp: s.xp, level: s.level }));
 }
 
-client.on('clientReady', async () => {
-    const guild = client.guilds.cache.get(INVITE_TRACK_GUILD_ID) || await client.guilds.fetch(INVITE_TRACK_GUILD_ID);
-    if (guild) {
+async function getTournament(guildId, tournamentId) {
+    return Tournament.findOne({ guildId, id: tournamentId }).lean();
+}
+
+async function saveTournament(tournament) {
+    const { _id, ...data } = tournament;
+    await Tournament.replaceOne({ guildId: data.guildId, id: data.id }, data, { upsert: true });
+}
+
+async function nextSequence(key, amount = 1) {
+    const counter = await Counter.findOneAndUpdate(
+        { _id: key },
+        { $inc: { seq: amount } },
+        { new: true, upsert: true }
+    );
+    return counter.seq;
+}
+
+async function getNextTournamentId(guildId) {
+    const seq = await nextSequence(`tournament:${guildId}`);
+    return `T${String(seq).padStart(3, "0")}`;
+}
+
+async function getNextMatchIds(guildId, count) {
+    const last = await nextSequence(`match:${guildId}`, count);
+    return Array.from({ length: count }, (_, i) => `M${String(last - count + 1 + i).padStart(4, "0")}`);
+}
+
+function shuffle(array) {
+    const result = [...array];
+    for (let i = result.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [result[i], result[j]] = [result[j], result[i]];
+    }
+    return result;
+}
+
+function nextPowerOfTwo(number) {
+    let power = 1;
+    while (power < number) power *= 2;
+    return power;
+}
+
+function getUserIdFromMention(value) {
+    if (!value) return null;
+    const match = value.match(/^<@!?(\d+)>$/);
+    return match ? match[1] : null;
+}
+
+async function formatUser(guild, userId) {
+    try {
+        const member = await guild.members.fetch(userId);
+        return `<@${userId}> (${member.user.username})`;
+    } catch {
         try {
-            const invites = await guild.invites.fetch();
-            guildInvites.set(guild.id, new Map(invites.map(inv => [inv.code, inv.uses])));
-        } catch (err) {
-            console.error('Failed to cache invites on ready:', err.message);
+            const user = await client.users.fetch(userId);
+            return `<@${userId}> (${user.username})`;
+        } catch {
+            return `<@${userId}>`;
         }
     }
-    console.log('Bot is ready');
-    client.user.setActivity(`Inside the AGG universe!`, { type: ActivityType.Playing });
-});
+}
+
+async function formatUsers(guild, userIds) {
+    return Promise.all(userIds.map(id => formatUser(guild, id)));
+}
+
+function successEmbed(title, description) {
+    return new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle(`✅ ${title}`)
+        .setDescription(description)
+        .setTimestamp();
+}
+
+function errorEmbed(description) {
+    return new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle("❌ Error")
+        .setDescription(description)
+        .setTimestamp();
+}
+
+function infoEmbed(title, description) {
+    return new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle(`ℹ️ ${title}`)
+        .setDescription(description)
+        .setTimestamp();
+}
+
+async function sendEmbedPages(message, pages) {
+    for (const page of pages) {
+        const embed = new EmbedBuilder().setColor(EMBED_COLOR).setTimestamp();
+        if (page.title) embed.setTitle(page.title);
+        if (page.description) embed.setDescription(page.description);
+        if (page.footer) embed.setFooter({ text: page.footer });
+        await message.channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+    }
+}
+
+function buildPagesFromLines(lines, title) {
+    const pages = [];
+    let current = "";
+    for (const line of lines) {
+        const addition = current.length === 0 ? line : `\n${line}`;
+        if (current.length + addition.length > EMBED_DESCRIPTION_LIMIT) {
+            if (current.length > 0) {
+                pages.push({
+                    title: pages.length === 0 ? title : `${title} • Page ${pages.length + 1}`,
+                    description: current
+                });
+            }
+            current = line;
+        } else {
+            current += addition;
+        }
+    }
+    if (current.length > 0) {
+        pages.push({
+            title: pages.length === 0 ? title : `${title} • Page ${pages.length + 1}`,
+            description: current
+        });
+    }
+    return pages;
+}
+
+async function replyEmbed(message, embed) {
+    return message.reply({ embeds: [embed], allowedMentions: { parse: [] } });
+}
+
+async function createRound(tournament, players, roundNumber) {
+    const shuffledPlayers = shuffle(players);
+    const bracketSize = nextPowerOfTwo(shuffledPlayers.length);
+    const byeCount = bracketSize - shuffledPlayers.length;
+    const byePlayers = shuffledPlayers.slice(0, byeCount);
+    const pairedPlayers = shuffledPlayers.slice(byeCount);
+    const pairCount = pairedPlayers.length / 2;
+    const matchIds = await getNextMatchIds(tournament.guildId, byePlayers.length + pairCount);
+    const newMatches = [];
+    let idIndex = 0;
+    for (const player of byePlayers) {
+        newMatches.push({
+            id: matchIds[idIndex++],
+            tournamentId: tournament.id,
+            round: roundNumber,
+            player1: player,
+            player2: null,
+            winner: player,
+            status: "completed",
+            resultType: "bye",
+            createdAt: Date.now(),
+            completedAt: Date.now()
+        });
+    }
+    for (let i = 0; i < pairedPlayers.length; i += 2) {
+        newMatches.push({
+            id: matchIds[idIndex++],
+            tournamentId: tournament.id,
+            round: roundNumber,
+            player1: pairedPlayers[i],
+            player2: pairedPlayers[i + 1],
+            winner: null,
+            status: "pending",
+            resultType: null,
+            createdAt: Date.now(),
+            completedAt: null
+        });
+    }
+    tournament.matches.push(...newMatches);
+    tournament.currentRound = roundNumber;
+    await saveTournament(tournament);
+    return newMatches;
+}
+
+function getRoundMatches(tournament, roundNumber) {
+    return tournament.matches.filter(match => match.round === roundNumber);
+}
+
+function getRoundWinners(tournament, roundNumber) {
+    return getRoundMatches(tournament, roundNumber)
+        .filter(match => match.status === "completed" && match.winner)
+        .map(match => match.winner);
+}
+
+function isRoundComplete(tournament, roundNumber) {
+    const matches = getRoundMatches(tournament, roundNumber);
+    return matches.length > 0 && matches.every(match => match.status === "completed");
+}
+
+async function advanceTournament(tournament) {
+    const currentRound = tournament.currentRound;
+    if (!isRoundComplete(tournament, currentRound)) return null;
+    const winners = getRoundWinners(tournament, currentRound);
+    if (winners.length === 1) {
+        tournament.status = "completed";
+        tournament.winner = winners[0];
+        tournament.completedAt = Date.now();
+        await saveTournament(tournament);
+        return { type: "winner", winner: winners[0] };
+    }
+    const nextRound = currentRound + 1;
+    const matches = await createRound(tournament, winners, nextRound);
+    return { type: "nextRound", round: nextRound, matches };
+}
+
+async function formatMatch(guild, match) {
+    const [player1, player2] = await Promise.all([
+        match.player1 ? formatUser(guild, match.player1) : Promise.resolve("🎫 **BYE**"),
+        match.player2 ? formatUser(guild, match.player2) : Promise.resolve("🎫 **BYE**")
+    ]);
+    let result;
+    if (match.resultType === "bye") {
+        result = `🎫 **BYE →** ${await formatUser(guild, match.winner)}`;
+    } else if (match.resultType === "disqualification") {
+        result = match.winner
+            ? `🚫 **DQ →** ${await formatUser(guild, match.winner)}`
+            : "🚫 **DQ**";
+    } else if (match.status === "completed") {
+        result = `🏆 **Winner:** ${await formatUser(guild, match.winner)}`;
+    } else {
+        result = "⏳ **Pending**";
+    }
+    return `\`${match.id}\`\n${player1} vs ${player2}\n${result}`;
+}
+
+async function createTournament(message, args) {
+    if (!message.member.roles.cache.has(TOURNAMENT_ORGANISER_ROLE_ID)) {
+        return replyEmbed(message, errorEmbed("You need the **Tournament Organiser** role to create a tournament."));
+    }
+    if (args.length < 2) {
+        return replyEmbed(message, errorEmbed(
+            "Usage: `!tournament create <max_players> <name>`\n\nExample: `!tournament create 16 Valorant Cup`"
+        ));
+    }
+    const maxPlayers = Number(args[0]);
+    if (!Number.isInteger(maxPlayers) || maxPlayers < 2) {
+        return replyEmbed(message, errorEmbed("Maximum players must be a whole number of at least 2."));
+    }
+    const name = args.slice(1).join(" ");
+    const tournamentId = await getNextTournamentId(message.guild.id);
+    const tournament = {
+        id: tournamentId,
+        name,
+        guildId: message.guild.id,
+        channelId: message.channel.id,
+        hostId: message.author.id,
+        maxPlayers,
+        players: [],
+        disqualified: [],
+        matches: [],
+        currentRound: 0,
+        winner: null,
+        status: "registration",
+        createdAt: Date.now(),
+        startedAt: null,
+        completedAt: null,
+        cancelledAt: null
+    };
+    await saveTournament(tournament);
+    const host = await formatUser(message.guild, message.author.id);
+    const embed = new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle("🏆 Tournament Created")
+        .setDescription(`**${name}**`)
+        .addFields(
+            { name: "Tournament ID", value: `\`${tournamentId}\``, inline: true },
+            { name: "Host", value: host, inline: true },
+            { name: "Players", value: `0/${maxPlayers}`, inline: true },
+            { name: "Registration", value: `Use \`!tournament register ${tournamentId}\``, inline: false },
+            { name: "Host Registration", value: `Use \`!tournament register ${tournamentId} @player\``, inline: false },
+            { name: "Start", value: `Use \`!tournament start ${tournamentId}\``, inline: false }
+        )
+        .setTimestamp();
+    return replyEmbed(message, embed);
+}
+
+async function registerPlayer(message, args) {
+    if (!args[0]) {
+        return replyEmbed(message, errorEmbed("Usage: `!tournament register <tournament_id> [@player]`"));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    const isHost = tournament.hostId === message.author.id;
+    const registeringOther = Boolean(args[1]);
+    if (registeringOther && !isHost) {
+        return replyEmbed(message, errorEmbed("Only the tournament host can register another player."));
+    }
+    const canRegister = tournament.status === "registration" ||
+        (tournament.status === "registration_closed" && isHost && registeringOther);
+    if (!canRegister) {
+        const message_ = tournament.status === "registration_closed"
+            ? "Registration is closed. Only the host can add a player directly, and only before the tournament starts."
+            : "Registration is closed for this tournament.";
+        return replyEmbed(message, errorEmbed(message_));
+    }
+    let playerId = message.author.id;
+    if (registeringOther) {
+        playerId = getUserIdFromMention(args[1]);
+        if (!playerId) return replyEmbed(message, errorEmbed("Please mention a valid Discord user."));
+    }
+    if (tournament.disqualified?.includes(playerId)) {
+        const user = await formatUser(message.guild, playerId);
+        return replyEmbed(message, errorEmbed(`${user} has been disqualified from this tournament and cannot register.`));
+    }
+    if (tournament.players.includes(playerId)) {
+        const user = await formatUser(message.guild, playerId);
+        return replyEmbed(message, errorEmbed(`${user} is already registered.`));
+    }
+    if (tournament.players.length >= tournament.maxPlayers) {
+        return replyEmbed(message, errorEmbed("This tournament is already full."));
+    }
+    tournament.players.push(playerId);
+    await saveTournament(tournament);
+    const user = await formatUser(message.guild, playerId);
+    return replyEmbed(message, successEmbed(
+        "Player Registered",
+        `${user} has been registered for **${tournament.name}**.\n\nPlayers: **${tournament.players.length}/${tournament.maxPlayers}**`
+    ));
+}
+
+async function leaveTournament(message, args) {
+    if (!args[0]) {
+        return replyEmbed(message, errorEmbed("Usage: `!tournament leave <tournament_id>`"));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    if (tournament.status !== "registration" && tournament.status !== "registration_closed") {
+        return replyEmbed(message, errorEmbed("You can only leave a tournament before it starts."));
+    }
+    if (!tournament.players.includes(message.author.id)) {
+        return replyEmbed(message, errorEmbed("You are not registered for this tournament."));
+    }
+    tournament.players = tournament.players.filter(p => p !== message.author.id);
+    await saveTournament(tournament);
+    return replyEmbed(message, successEmbed(
+        "Left Tournament",
+        `You have left **${tournament.name}**.\n\nPlayers: **${tournament.players.length}/${tournament.maxPlayers}**`
+    ));
+}
+
+async function closeRegistration(message, args) {
+    if (!args[0]) {
+        return replyEmbed(message, errorEmbed("Usage: `!tournament registrationClose <tournament_id>`"));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    if (tournament.hostId !== message.author.id) {
+        return replyEmbed(message, errorEmbed("Only the tournament host can close registration."));
+    }
+    if (tournament.status !== "registration") {
+        return replyEmbed(message, errorEmbed("Registration is already closed."));
+    }
+    tournament.status = "registration_closed";
+    await saveTournament(tournament);
+    return replyEmbed(message, new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle("🔒 Registration Closed")
+        .setDescription(`Registration for **${tournament.name}** has been closed.`)
+        .addFields({ name: "Registered Players", value: `${tournament.players.length}`, inline: true })
+        .setTimestamp()
+    );
+}
+
+async function showParticipants(message, args) {
+    if (!args[0]) {
+        return replyEmbed(message, errorEmbed("Usage: `!tournament participants <tournament_id>`"));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    if (tournament.players.length === 0) {
+        return replyEmbed(message, new EmbedBuilder()
+            .setColor(EMBED_COLOR)
+            .setTitle(`👥 ${tournament.name} — Participants`)
+            .setDescription("No participants yet.")
+            .addFields({ name: "Players", value: `0/${tournament.maxPlayers}`, inline: true })
+            .setTimestamp()
+        );
+    }
+    const usernames = await formatUsers(message.guild, tournament.players);
+    const lines = tournament.players.map((player, i) => {
+        const isDQ = tournament.disqualified?.includes(player);
+        return `${i + 1}. ${usernames[i]}${isDQ ? " 🚫 **Disqualified**" : ""}`;
+    });
+    const pages = buildPagesFromLines(lines, `👥 ${tournament.name} — Participants`);
+    pages[0].description = `**Players:** ${tournament.players.length}/${tournament.maxPlayers}\n\n${pages[0].description}`;
+    return sendEmbedPages(message, pages);
+}
+
+const STATUS_LABELS = {
+    registration: "🟢 Registration Open",
+    registration_closed: "🟡 Registration Closed"
+};
+
+async function listTournaments(message) {
+    const activeTournaments = await Tournament.find({
+        guildId: message.guild.id,
+        status: { $in: ["registration", "registration_closed", "active"] }
+    }).sort({ createdAt: -1 }).lean();
+    if (activeTournaments.length === 0) {
+        return replyEmbed(message, new EmbedBuilder()
+            .setColor(EMBED_COLOR)
+            .setTitle("📋 Active Tournaments")
+            .setDescription("There are currently no active tournaments in this server.")
+            .setTimestamp()
+        );
+    }
+    const lines = await Promise.all(activeTournaments.map(async tournament => {
+        const status = tournament.status === "active"
+            ? `🔵 Round ${tournament.currentRound}`
+            : STATUS_LABELS[tournament.status];
+
+        const host = await formatUser(message.guild, tournament.hostId);
+        return `🏆 **${tournament.name}**\n` +
+            `ID: \`${tournament.id}\`\n` +
+            `Host: ${host}\n` +
+            `Players: **${tournament.players.length}/${tournament.maxPlayers}**\n` +
+            `Status: ${status}`;
+    }));
+    const pages = buildPagesFromLines(lines, "📋 Active Tournaments");
+    return sendEmbedPages(message, pages);
+}
+
+async function tournamentHistory(message) {
+    const completed = await Tournament.find({
+        guildId: message.guild.id,
+        status: "completed"
+    }).sort({ completedAt: -1 }).lean();
+    if (completed.length === 0) {
+        return replyEmbed(message, infoEmbed(
+            "No Tournament History",
+            "No tournaments have been completed in this server yet."
+        ));
+    }
+
+    const lines = await Promise.all(completed.map(async tournament => {
+        const winner = tournament.winner ? await formatUser(message.guild, tournament.winner) : "Unknown";
+        const totalPlayers = tournament.players.length + (tournament.disqualified?.length || 0);
+        const completedDate = tournament.completedAt
+            ? `<t:${Math.floor(tournament.completedAt / 1000)}:D>`
+            : "Unknown date";
+        return `🏆 **${tournament.name}**\n` +
+            `ID: \`${tournament.id}\`\n` +
+            `Winner: ${winner}\n` +
+            `Players: **${totalPlayers}**\n` +
+            `Completed: ${completedDate}`;
+    }));
+    const pages = buildPagesFromLines(lines, "📜 Tournament History");
+    return sendEmbedPages(message, pages);
+}
+
+async function disqualifyPlayer(message, args) {
+    if (args.length < 2) {
+        return replyEmbed(message, errorEmbed("Usage: `!tournament disqualify <tournament_id> @player`"));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    if (tournament.hostId !== message.author.id) {
+        return replyEmbed(message, errorEmbed("Only the tournament host can disqualify participants."));
+    }
+    if (tournament.status === "completed") {
+        return replyEmbed(message, errorEmbed("This tournament has already been completed."));
+    }
+    if (tournament.status === "cancelled") {
+        return replyEmbed(message, errorEmbed("This tournament has been cancelled."));
+    }
+    const playerId = getUserIdFromMention(args[1]);
+    if (!playerId) {
+        return replyEmbed(message, errorEmbed("Please mention the participant you want to disqualify."));
+    }
+    if (!tournament.players.includes(playerId)) {
+        return replyEmbed(message, errorEmbed("That user is not a participant in this tournament."));
+    }
+    if (tournament.disqualified?.includes(playerId)) {
+        return replyEmbed(message, errorEmbed("That participant is already disqualified."));
+    }
+    const player = await formatUser(message.guild, playerId);
+    if (tournament.status === "registration" || tournament.status === "registration_closed") {
+        tournament.players = tournament.players.filter(p => p !== playerId);
+        tournament.disqualified.push(playerId);
+        await saveTournament(tournament);
+        return replyEmbed(message, new EmbedBuilder()
+            .setColor(EMBED_COLOR)
+            .setTitle("🚫 Participant Disqualified")
+            .setDescription(`${player} has been disqualified from **${tournament.name}**.`)
+            .addFields({ name: "Remaining Players", value: `${tournament.players.length}/${tournament.maxPlayers}`, inline: true })
+            .setTimestamp()
+        );
+    }
+    const currentMatches = getRoundMatches(tournament, tournament.currentRound);
+    const playerMatch = currentMatches.find(m => m.player1 === playerId || m.player2 === playerId);
+    if (!playerMatch) {
+        return replyEmbed(message, errorEmbed("This participant does not have a match in the current round."));
+    }
+    if (playerMatch.status === "completed") {
+        return replyEmbed(message, errorEmbed(
+            `${player}'s match \`${playerMatch.id}\` has already been completed.\n\n` +
+            "A completed current-round match cannot be changed by disqualification."
+        ));
+    }
+    const opponentId = playerMatch.player1 === playerId ? playerMatch.player2 : playerMatch.player1;
+    tournament.disqualified.push(playerId);
+    tournament.players = tournament.players.filter(p => p !== playerId);
+    playerMatch.status = "completed";
+    playerMatch.winner = opponentId || null;
+    playerMatch.resultType = "disqualification";
+    playerMatch.completedAt = Date.now();
+    await saveTournament(tournament);
+    const opponentText = opponentId
+        ? `\n\n🏆 ${await formatUser(message.guild, opponentId)} automatically advances.`
+        : "";
+    await replyEmbed(message, new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle("🚫 Participant Disqualified")
+        .setDescription(`${player} has been disqualified from **${tournament.name}**.${opponentText}`)
+        .addFields({ name: "Match", value: `\`${playerMatch.id}\``, inline: true })
+        .setTimestamp()
+    );
+    const result = await advanceTournament(tournament);
+    if (!result) return;
+    return sendAdvanceMessage(message, tournament, result);
+}
+
+async function myMatch(message, args) {
+    if (!args[0]) {
+        return replyEmbed(message, errorEmbed("Usage: `!tournament mymatch <tournament_id>`"));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    if (tournament.status !== "active") {
+        return replyEmbed(message, errorEmbed("This tournament is not currently active."));
+    }
+    const currentMatches = getRoundMatches(tournament, tournament.currentRound);
+    const match = currentMatches.find(m => m.player1 === message.author.id || m.player2 === message.author.id);
+    if (!match) {
+        return replyEmbed(message, infoEmbed(
+            "No Match Found",
+            `You don't have a match in the current round of **${tournament.name}**.`
+        ));
+    }
+    return replyEmbed(message, new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle(`⚔️ Your Match — ${tournament.name}`)
+        .setDescription(await formatMatch(message.guild, match))
+        .addFields({ name: "Round", value: `${match.round}`, inline: true })
+        .setTimestamp()
+    );
+}
+
+async function startTournament(message, args) {
+    if (!args[0]) {
+        return replyEmbed(message, errorEmbed("Usage: `!tournament start <tournament_id>`"));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    if (tournament.hostId !== message.author.id) {
+        return replyEmbed(message, errorEmbed("Only the tournament host can start the tournament."));
+    }
+    if (tournament.status !== "registration" && tournament.status !== "registration_closed") {
+        return replyEmbed(message, errorEmbed("This tournament cannot be started."));
+    }
+    if (tournament.players.length < 2) {
+        return replyEmbed(message, errorEmbed("At least 2 players must register before starting."));
+    }
+    tournament.status = "active";
+    tournament.startedAt = Date.now();
+    await saveTournament(tournament);
+    const matches = await createRound(tournament, tournament.players, 1);
+    const lines = await Promise.all(matches.map(match => formatMatch(message.guild, match)));
+    const pages = buildPagesFromLines(lines, `🏆 ${tournament.name} — Round 1`);
+    pages[0].description = `👥 **Players:** ${tournament.players.length}\n🎲 **Bracket:** Randomized\n\n${pages[0].description}`;
+    pages[pages.length - 1].description += "\n\nHost: use `!match result <match_id> @winner` when a match finishes.";
+    return sendEmbedPages(message, pages);
+}
+
+async function cancelTournament(message, args) {
+    if (!args[0]) {
+        return replyEmbed(message, errorEmbed("Usage: `!tournament cancel <tournament_id>`"));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    if (tournament.hostId !== message.author.id) {
+        return replyEmbed(message, errorEmbed("Only the tournament host can cancel the tournament."));
+    }
+    if (tournament.status === "completed" || tournament.status === "cancelled") {
+        return replyEmbed(message, errorEmbed("This tournament has already ended."));
+    }
+    tournament.status = "cancelled";
+    tournament.cancelledAt = Date.now();
+    await saveTournament(tournament);
+    return replyEmbed(message, new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle("❌ Tournament Cancelled")
+        .setDescription(`**${tournament.name}** has been cancelled.`)
+        .addFields({ name: "Tournament ID", value: `\`${tournament.id}\``, inline: true })
+        .setTimestamp()
+    );
+}
+
+async function purgeTournaments(message) {
+    if (!message.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+        return replyEmbed(message, errorEmbed("You need the **Manage Server** permission to purge tournaments."));
+    }
+    const { deletedCount } = await Tournament.deleteMany({
+        guildId: message.guild.id,
+        status: { $in: ["completed", "cancelled"] }
+    });
+    if (deletedCount === 0) {
+        return replyEmbed(message, infoEmbed(
+            "Nothing to Purge",
+            "There are no completed or cancelled tournaments to remove."
+        ));
+    }
+    return replyEmbed(message, successEmbed(
+        "Tournaments Purged",
+        `Removed **${deletedCount}** completed/cancelled tournament(s) from storage.`
+    ));
+}
+
+async function showBrackets(message, args) {
+    if (!args[0]) {
+        return replyEmbed(message, errorEmbed("Usage: `!tournament brackets <tournament_id>`"));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    const host = await formatUser(message.guild, tournament.hostId);
+    const pages = [];
+    if (tournament.status === "registration" || tournament.status === "registration_closed") {
+        const usernames = await formatUsers(message.guild, tournament.players);
+        const lines = tournament.players.length > 0
+            ? tournament.players.map((player, i) => {
+                const isDQ = tournament.disqualified?.includes(player);
+                return `${i + 1}. ${usernames[i]}${isDQ ? " 🚫 **Disqualified**" : ""}`;
+            })
+            : ["No players registered yet."];
+        const status = STATUS_LABELS[tournament.status];
+        pages.push(...buildPagesFromLines(lines, `🏆 ${tournament.name} — Participants`));
+        pages[0].description =
+            `**ID:** \`${tournament.id}\`\n**Host:** ${host}\n**Status:** ${status}\n` +
+            `**Players:** ${tournament.players.length}/${tournament.maxPlayers}\n\n${pages[0].description}`;
+        return sendEmbedPages(message, pages);
+    }
+    if (tournament.status === "cancelled") {
+        return replyEmbed(message, new EmbedBuilder()
+            .setColor(EMBED_COLOR)
+            .setTitle(`🏆 ${tournament.name}`)
+            .setDescription("❌ This tournament has been cancelled.")
+            .addFields(
+                { name: "Tournament ID", value: `\`${tournament.id}\``, inline: true },
+                { name: "Host", value: host, inline: true }
+            )
+            .setTimestamp()
+        );
+    }
+    const rounds = {};
+    for (const match of tournament.matches) {
+        (rounds[match.round] ??= []).push(match);
+    }
+    const sortedRounds = Object.keys(rounds).sort((a, b) => Number(a) - Number(b));
+    for (const round of sortedRounds) {
+        const roundLines = await Promise.all(rounds[round].map(match => formatMatch(message.guild, match)));
+        pages.push(...buildPagesFromLines(roundLines, `🏆 ${tournament.name} — Round ${round}`));
+    }
+    if (tournament.status === "completed") {
+        const winner = tournament.winner ? await formatUser(message.guild, tournament.winner) : "Unknown";
+        pages.unshift({
+            title: `🏆 ${tournament.name} — Tournament Complete`,
+            description:
+                `**Tournament ID:** \`${tournament.id}\`\n**Host:** ${host}\n**Status:** 🏆 Completed\n\n` +
+                `🏆 **Winner:** ${winner}`
+        });
+    } else {
+        pages.unshift({
+            title: `🏆 ${tournament.name} — Brackets`,
+            description:
+                `**Tournament ID:** \`${tournament.id}\`\n**Host:** ${host}\n` +
+                `**Status:** 🔵 Round ${tournament.currentRound}\n` +
+                `**Players:** ${tournament.players.length}/${tournament.maxPlayers}`
+        });
+    }
+    return sendEmbedPages(message, pages);
+}
+
+async function findMatch(guildId, matchId) {
+    const tournament = await Tournament.findOne({ guildId, "matches.id": matchId }).lean();
+    if (!tournament) return null;
+    const match = tournament.matches.find(m => m.id === matchId);
+    return match ? { tournament, match } : null;
+}
+
+async function sendAdvanceMessage(message, tournament, result) {
+    if (result.type === "winner") {
+        const winner = await formatUser(message.guild, result.winner);
+        return replyEmbed(message, new EmbedBuilder()
+            .setColor(EMBED_COLOR)
+            .setTitle("🏆🏆 Tournament Complete!")
+            .setDescription(`**${tournament.name}** has been completed.`)
+            .addFields(
+                { name: "Winner", value: winner, inline: false },
+                { name: "Tournament ID", value: `\`${tournament.id}\``, inline: true }
+            )
+            .setTimestamp()
+        );
+    }
+    if (result.type === "nextRound") {
+        const lines = await Promise.all(result.matches.map(match => formatMatch(message.guild, match)));
+        const pages = buildPagesFromLines(lines, `🔥 ${tournament.name} — Round ${result.round}`);
+        pages[0].description = `🔥 **Round ${result.round} is starting!**\n\n${pages[0].description}`;
+        pages[pages.length - 1].description += "\n\nHost: use `!match result <match_id> @winner` when a match finishes.";
+        return sendEmbedPages(message, pages);
+    }
+}
+
+async function matchResult(message, args) {
+    if (args.length < 2) {
+        return replyEmbed(message, errorEmbed("Usage: `!match result <match_id> @winner`"));
+    }
+    const matchId = args[0].toUpperCase();
+    const winnerId = getUserIdFromMention(args[1]);
+    if (!winnerId) return replyEmbed(message, errorEmbed("Please mention the winning player."));
+    const found = await findMatch(message.guild.id, matchId);
+    if (!found) return replyEmbed(message, errorEmbed(`Match \`${matchId}\` not found in this server.`));
+    const { tournament, match } = found;
+    if (tournament.hostId !== message.author.id) {
+        return replyEmbed(message, errorEmbed("Only the tournament host can report match results."));
+    }
+    if (tournament.status !== "active") {
+        return replyEmbed(message, errorEmbed("This tournament is not currently active."));
+    }
+    if (match.round !== tournament.currentRound) {
+        return replyEmbed(message, errorEmbed(
+            `This match belongs to Round ${match.round}.\n\nThe current round is Round ${tournament.currentRound}.`
+        ));
+    }
+    if (match.status === "completed") {
+        const winner = match.winner ? await formatUser(message.guild, match.winner) : "No winner";
+        return replyEmbed(message, errorEmbed(`Match \`${matchId}\` already has a result.\n\nWinner: ${winner}`));
+    }
+    if (winnerId !== match.player1 && winnerId !== match.player2) {
+        const winner = await formatUser(message.guild, winnerId);
+        return replyEmbed(message, errorEmbed(`${winner} is not participating in match \`${matchId}\`.`));
+    }
+    if (tournament.disqualified?.includes(winnerId)) {
+        return replyEmbed(message, errorEmbed("A disqualified participant cannot be declared the winner."));
+    }
+    match.winner = winnerId;
+    match.status = "completed";
+    match.resultType = "normal";
+    match.completedAt = Date.now();
+    await saveTournament(tournament);
+    const winner = await formatUser(message.guild, winnerId);
+    await replyEmbed(message, new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle("🏆 Match Result Recorded")
+        .setDescription(`Match \`${matchId}\` has been completed.`)
+        .addFields(
+            { name: "Winner", value: winner, inline: false },
+            { name: "Round", value: `${match.round}`, inline: true }
+        )
+        .setTimestamp()
+    );
+    const result = await advanceTournament(tournament);
+    if (!result) return;
+    return sendAdvanceMessage(message, tournament, result);
+}
+
+async function restartMatch(message, args) {
+    if (!args[0]) return replyEmbed(message, errorEmbed("Usage: `!match restart <match_id>`"));
+    const matchId = args[0].toUpperCase();
+    const found = await findMatch(message.guild.id, matchId);
+    if (!found) return replyEmbed(message, errorEmbed(`Match \`${matchId}\` not found in this server.`));
+    const { tournament, match } = found;
+    if (tournament.hostId !== message.author.id) {
+        return replyEmbed(message, errorEmbed("Only the tournament host can restart a match."));
+    }
+    if (tournament.status !== "active") {
+        return replyEmbed(message, errorEmbed("This tournament is not currently active."));
+    }
+    if (match.round !== tournament.currentRound) {
+        return replyEmbed(message, errorEmbed(
+            `You can only restart matches from the current round.\n\n` +
+            `Match \`${matchId}\` is from Round ${match.round}.\nCurrent round: Round ${tournament.currentRound}.`
+        ));
+    }
+    if (match.status !== "completed") {
+        return replyEmbed(message, errorEmbed(`Match \`${matchId}\` does not have a result to restart.`));
+    }
+    if (match.resultType === "bye") {
+        return replyEmbed(message, errorEmbed("A BYE match cannot be restarted."));
+    }
+    if (match.resultType === "disqualification") {
+        return replyEmbed(message, errorEmbed("A disqualification result cannot be restarted."));
+    }
+    match.status = "pending";
+    match.winner = null;
+    match.resultType = null;
+    match.completedAt = null;
+    await saveTournament(tournament);
+    const [player1, player2] = await formatUsers(message.guild, [match.player1, match.player2]);
+    return replyEmbed(message, new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle("🔄 Match Restarted")
+        .setDescription(`Match \`${matchId}\` has been reset.`)
+        .addFields(
+            { name: "Players", value: `${player1} vs ${player2}`, inline: false },
+            { name: "Status", value: "⏳ Pending", inline: true }
+        )
+        .setTimestamp()
+    );
+}
+
+function withGuildLock(guildId, task) {
+    const previous = guildLocks.get(guildId) || Promise.resolve();
+    const result = previous.then(task, task);
+    guildLocks.set(guildId, result.catch(() => { }));
+    return result;
+}
 
 function getXpAmount(member, boosts) {
     let number = Math.round(Math.random() * 30) + 20;
@@ -286,6 +1142,91 @@ app.post("/topgg", express.json(), async (req, res) => {
         }
     }
     res.sendStatus(200);
+});
+
+client.on('clientReady', async () => {
+    const guild = client.guilds.cache.get(INVITE_TRACK_GUILD_ID) || await client.guilds.fetch(INVITE_TRACK_GUILD_ID);
+    if (guild) {
+        try {
+            const invites = await guild.invites.fetch();
+            guildInvites.set(guild.id, new Map(invites.map(inv => [inv.code, inv.uses])));
+        } catch (err) {
+            console.error('Failed to cache invites on ready:', err.message);
+        }
+    }
+    console.log('Bot is ready');
+    client.user.setActivity(`Inside the AGG universe!`, { type: ActivityType.Playing });
+});
+
+client.on("messageCreate", async message => {
+    if (message.author.bot || !message.guild || !message.content.startsWith(PREFIX)) return;
+    const parts = message.content.slice(PREFIX.length).trim().split(/\s+/);
+    const command = parts.shift()?.toLowerCase();
+    if (command !== "tournament" && command !== "match") return;
+    await withGuildLock(message.guild.id, async () => {
+        try {
+            if (command === "tournament") {
+                const subcommand = parts.shift()?.toLowerCase();
+                if (!subcommand) {
+                    return replyEmbed(message, new EmbedBuilder()
+                        .setColor(EMBED_COLOR)
+                        .setTitle("🏆 Tournament Commands")
+                        .setDescription([
+                            "`!tournament create <max_players> <name>`",
+                            "`!tournament register <tournament_id> [@player]`",
+                            "`!tournament leave <tournament_id>`",
+                            "`!tournament registrationClose <tournament_id>`",
+                            "`!tournament start <tournament_id>`",
+                            "`!tournament list`",
+                            "`!tournament participants <tournament_id>`",
+                            "`!tournament disqualify <tournament_id> @player`",
+                            "`!tournament brackets <tournament_id>`",
+                            "`!tournament mymatch <tournament_id>`",
+                            "`!tournament history`",
+                            "`!tournament cancel <tournament_id>`",
+                            "`!tournament purge`"
+                        ].join("\n"))
+                        .setTimestamp()
+                    );
+                }
+                switch (subcommand) {
+                    case "create": return createTournament(message, parts);
+                    case "register": return registerPlayer(message, parts);
+                    case "leave": return leaveTournament(message, parts);
+                    case "registrationclose": return closeRegistration(message, parts);
+                    case "start": return startTournament(message, parts);
+                    case "list": return listTournaments(message);
+                    case "participants": return showParticipants(message, parts);
+                    case "disqualify": return disqualifyPlayer(message, parts);
+                    case "brackets": return showBrackets(message, parts);
+                    case "mymatch": return myMatch(message, parts);
+                    case "history": return tournamentHistory(message);
+                    case "cancel": return cancelTournament(message, parts);
+                    case "purge": return purgeTournaments(message);
+                    default: return replyEmbed(message, errorEmbed("Unknown tournament command."));
+                }
+            }
+            if (command === "match") {
+                const subcommand = parts.shift()?.toLowerCase();
+                if (!subcommand) {
+                    return replyEmbed(message, new EmbedBuilder()
+                        .setColor(EMBED_COLOR)
+                        .setTitle("⚔️ Match Commands")
+                        .setDescription(["`!match result <match_id> @winner`", "`!match restart <match_id>`"].join("\n"))
+                        .setTimestamp()
+                    );
+                }
+                switch (subcommand) {
+                    case "result": return matchResult(message, parts);
+                    case "restart": return restartMatch(message, parts);
+                    default: return replyEmbed(message, errorEmbed("Unknown match command."));
+                }
+            }
+        } catch (error) {
+            console.error("Command error:", error);
+            return replyEmbed(message, errorEmbed("An unexpected error occurred while processing the command."));
+        }
+    });
 });
 
 client.on("messageCreate", async (message) => {
@@ -752,4 +1693,3 @@ client.on('guildMemberRemove', async member => {
     console.error("Startup failed:", error);
     process.exit(1);
 });
-
