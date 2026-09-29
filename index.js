@@ -238,7 +238,7 @@ async function formatUsers(guild, userIds) {
 function successEmbed(title, description) {
     return new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle(`✅ ${title}`)
+        .setTitle(`${title}`)
         .setDescription(description)
         .setTimestamp();
 }
@@ -246,7 +246,7 @@ function successEmbed(title, description) {
 function errorEmbed(description) {
     return new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle("❌ Error")
+        .setTitle("Error")
         .setDescription(description)
         .setTimestamp();
 }
@@ -376,20 +376,20 @@ async function advanceTournament(tournament) {
 
 async function formatMatch(guild, match) {
     const [player1, player2] = await Promise.all([
-        match.player1 ? formatUser(guild, match.player1) : Promise.resolve("🎫 **BYE**"),
-        match.player2 ? formatUser(guild, match.player2) : Promise.resolve("🎫 **BYE**")
+        match.player1 ? formatUser(guild, match.player1) : Promise.resolve("**BYE**"),
+        match.player2 ? formatUser(guild, match.player2) : Promise.resolve("**BYE**")
     ]);
     let result;
     if (match.resultType === "bye") {
-        result = `🎫 **BYE →** ${await formatUser(guild, match.winner)}`;
+        result = `**BYE →** ${await formatUser(guild, match.winner)}`;
     } else if (match.resultType === "disqualification") {
         result = match.winner
-            ? `🚫 **DQ →** ${await formatUser(guild, match.winner)}`
-            : "🚫 **DQ**";
+            ? `**DQ →** ${await formatUser(guild, match.winner)}`
+            : "**DQ**";
     } else if (match.status === "completed") {
-        result = `🏆 **Winner:** ${await formatUser(guild, match.winner)}`;
+        result = `**Winner:** ${await formatUser(guild, match.winner)}`;
     } else {
-        result = "⏳ **Pending**";
+        result = "**Pending**";
     }
     return `\`${match.id}\`\n${player1} vs ${player2}\n${result}`;
 }
@@ -431,7 +431,7 @@ async function createTournament(message, args) {
     const host = await formatUser(message.guild, message.author.id);
     const embed = new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle("🏆 Tournament Created")
+        .setTitle("Tournament Created")
         .setDescription(`**${name}**`)
         .addFields(
             { name: "Tournament ID", value: `\`${tournamentId}\``, inline: true },
@@ -525,7 +525,7 @@ async function closeRegistration(message, args) {
     await saveTournament(tournament);
     return replyEmbed(message, new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle("🔒 Registration Closed")
+        .setTitle("Registration Closed")
         .setDescription(`Registration for **${tournament.name}** has been closed.`)
         .addFields({ name: "Registered Players", value: `${tournament.players.length}`, inline: true })
         .setTimestamp()
@@ -541,7 +541,7 @@ async function showParticipants(message, args) {
     if (tournament.players.length === 0) {
         return replyEmbed(message, new EmbedBuilder()
             .setColor(EMBED_COLOR)
-            .setTitle(`👥 ${tournament.name} — Participants`)
+            .setTitle(`${tournament.name} - Participants`)
             .setDescription("No participants yet.")
             .addFields({ name: "Players", value: `0/${tournament.maxPlayers}`, inline: true })
             .setTimestamp()
@@ -550,16 +550,16 @@ async function showParticipants(message, args) {
     const usernames = await formatUsers(message.guild, tournament.players);
     const lines = tournament.players.map((player, i) => {
         const isDQ = tournament.disqualified?.includes(player);
-        return `${i + 1}. ${usernames[i]}${isDQ ? " 🚫 **Disqualified**" : ""}`;
+        return `${i + 1}. ${usernames[i]}${isDQ ? " **Disqualified**" : ""}`;
     });
-    const pages = buildPagesFromLines(lines, `👥 ${tournament.name} — Participants`);
+    const pages = buildPagesFromLines(lines, `${tournament.name} - Participants`);
     pages[0].description = `**Players:** ${tournament.players.length}/${tournament.maxPlayers}\n\n${pages[0].description}`;
     return sendEmbedPages(message, pages);
 }
 
 const STATUS_LABELS = {
-    registration: "🟢 Registration Open",
-    registration_closed: "🟡 Registration Closed"
+    registration: "Registration Open",
+    registration_closed: "Registration Closed"
 };
 
 async function listTournaments(message) {
@@ -570,24 +570,24 @@ async function listTournaments(message) {
     if (activeTournaments.length === 0) {
         return replyEmbed(message, new EmbedBuilder()
             .setColor(EMBED_COLOR)
-            .setTitle("📋 Active Tournaments")
+            .setTitle("Active Tournaments")
             .setDescription("There are currently no active tournaments in this server.")
             .setTimestamp()
         );
     }
     const lines = await Promise.all(activeTournaments.map(async tournament => {
         const status = tournament.status === "active"
-            ? `🔵 Round ${tournament.currentRound}`
+            ? `Round ${tournament.currentRound}`
             : STATUS_LABELS[tournament.status];
 
         const host = await formatUser(message.guild, tournament.hostId);
-        return `🏆 **${tournament.name}**\n` +
+        return `**${tournament.name}**\n` +
             `ID: \`${tournament.id}\`\n` +
             `Host: ${host}\n` +
             `Players: **${tournament.players.length}/${tournament.maxPlayers}**\n` +
             `Status: ${status}`;
     }));
-    const pages = buildPagesFromLines(lines, "📋 Active Tournaments");
+    const pages = buildPagesFromLines(lines, "Active Tournaments");
     return sendEmbedPages(message, pages);
 }
 
@@ -609,13 +609,13 @@ async function tournamentHistory(message) {
         const completedDate = tournament.completedAt
             ? `<t:${Math.floor(tournament.completedAt / 1000)}:D>`
             : "Unknown date";
-        return `🏆 **${tournament.name}**\n` +
+        return `**${tournament.name}**\n` +
             `ID: \`${tournament.id}\`\n` +
             `Winner: ${winner}\n` +
             `Players: **${totalPlayers}**\n` +
             `Completed: ${completedDate}`;
     }));
-    const pages = buildPagesFromLines(lines, "📜 Tournament History");
+    const pages = buildPagesFromLines(lines, "Tournament History");
     return sendEmbedPages(message, pages);
 }
 
@@ -651,7 +651,7 @@ async function disqualifyPlayer(message, args) {
         await saveTournament(tournament);
         return replyEmbed(message, new EmbedBuilder()
             .setColor(EMBED_COLOR)
-            .setTitle("🚫 Participant Disqualified")
+            .setTitle("Participant Disqualified")
             .setDescription(`${player} has been disqualified from **${tournament.name}**.`)
             .addFields({ name: "Remaining Players", value: `${tournament.players.length}/${tournament.maxPlayers}`, inline: true })
             .setTimestamp()
@@ -677,11 +677,11 @@ async function disqualifyPlayer(message, args) {
     playerMatch.completedAt = Date.now();
     await saveTournament(tournament);
     const opponentText = opponentId
-        ? `\n\n🏆 ${await formatUser(message.guild, opponentId)} automatically advances.`
+        ? `\n\n${await formatUser(message.guild, opponentId)} automatically advances.`
         : "";
     await replyEmbed(message, new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle("🚫 Participant Disqualified")
+        .setTitle("Participant Disqualified")
         .setDescription(`${player} has been disqualified from **${tournament.name}**.${opponentText}`)
         .addFields({ name: "Match", value: `\`${playerMatch.id}\``, inline: true })
         .setTimestamp()
@@ -710,7 +710,7 @@ async function myMatch(message, args) {
     }
     return replyEmbed(message, new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle(`⚔️ Your Match — ${tournament.name}`)
+        .setTitle(`Your Match - ${tournament.name}`)
         .setDescription(await formatMatch(message.guild, match))
         .addFields({ name: "Round", value: `${match.round}`, inline: true })
         .setTimestamp()
@@ -737,8 +737,8 @@ async function startTournament(message, args) {
     await saveTournament(tournament);
     const matches = await createRound(tournament, tournament.players, 1);
     const lines = await Promise.all(matches.map(match => formatMatch(message.guild, match)));
-    const pages = buildPagesFromLines(lines, `🏆 ${tournament.name} — Round 1`);
-    pages[0].description = `👥 **Players:** ${tournament.players.length}\n🎲 **Bracket:** Randomized\n\n${pages[0].description}`;
+    const pages = buildPagesFromLines(lines, `${tournament.name} - Round 1`);
+    pages[0].description = `**Players:** ${tournament.players.length}\n**Bracket:** Randomized\n\n${pages[0].description}`;
     pages[pages.length - 1].description += "\n\nHost: use `!match result <match_id> @winner` when a match finishes.";
     return sendEmbedPages(message, pages);
 }
@@ -760,7 +760,7 @@ async function cancelTournament(message, args) {
     await saveTournament(tournament);
     return replyEmbed(message, new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle("❌ Tournament Cancelled")
+        .setTitle("Tournament Cancelled")
         .setDescription(`**${tournament.name}** has been cancelled.`)
         .addFields({ name: "Tournament ID", value: `\`${tournament.id}\``, inline: true })
         .setTimestamp()
@@ -800,11 +800,11 @@ async function showBrackets(message, args) {
         const lines = tournament.players.length > 0
             ? tournament.players.map((player, i) => {
                 const isDQ = tournament.disqualified?.includes(player);
-                return `${i + 1}. ${usernames[i]}${isDQ ? " 🚫 **Disqualified**" : ""}`;
+                return `${i + 1}. ${usernames[i]}${isDQ ? " **Disqualified**" : ""}`;
             })
             : ["No players registered yet."];
         const status = STATUS_LABELS[tournament.status];
-        pages.push(...buildPagesFromLines(lines, `🏆 ${tournament.name} — Participants`));
+        pages.push(...buildPagesFromLines(lines, `${tournament.name} - Participants`));
         pages[0].description =
             `**ID:** \`${tournament.id}\`\n**Host:** ${host}\n**Status:** ${status}\n` +
             `**Players:** ${tournament.players.length}/${tournament.maxPlayers}\n\n${pages[0].description}`;
@@ -813,8 +813,8 @@ async function showBrackets(message, args) {
     if (tournament.status === "cancelled") {
         return replyEmbed(message, new EmbedBuilder()
             .setColor(EMBED_COLOR)
-            .setTitle(`🏆 ${tournament.name}`)
-            .setDescription("❌ This tournament has been cancelled.")
+            .setTitle(`${tournament.name}`)
+            .setDescription("This tournament has been cancelled.")
             .addFields(
                 { name: "Tournament ID", value: `\`${tournament.id}\``, inline: true },
                 { name: "Host", value: host, inline: true }
@@ -829,22 +829,22 @@ async function showBrackets(message, args) {
     const sortedRounds = Object.keys(rounds).sort((a, b) => Number(a) - Number(b));
     for (const round of sortedRounds) {
         const roundLines = await Promise.all(rounds[round].map(match => formatMatch(message.guild, match)));
-        pages.push(...buildPagesFromLines(roundLines, `🏆 ${tournament.name} — Round ${round}`));
+        pages.push(...buildPagesFromLines(roundLines, `${tournament.name} - Round ${round}`));
     }
     if (tournament.status === "completed") {
         const winner = tournament.winner ? await formatUser(message.guild, tournament.winner) : "Unknown";
         pages.unshift({
-            title: `🏆 ${tournament.name} — Tournament Complete`,
+            title: `${tournament.name} - Tournament Complete`,
             description:
-                `**Tournament ID:** \`${tournament.id}\`\n**Host:** ${host}\n**Status:** 🏆 Completed\n\n` +
-                `🏆 **Winner:** ${winner}`
+                `**Tournament ID:** \`${tournament.id}\`\n**Host:** ${host}\n**Status:** Completed\n\n` +
+                `**Winner:** ${winner}`
         });
     } else {
         pages.unshift({
-            title: `🏆 ${tournament.name} — Brackets`,
+            title: `${tournament.name} - Brackets`,
             description:
                 `**Tournament ID:** \`${tournament.id}\`\n**Host:** ${host}\n` +
-                `**Status:** 🔵 Round ${tournament.currentRound}\n` +
+                `**Status:** Round ${tournament.currentRound}\n` +
                 `**Players:** ${tournament.players.length}/${tournament.maxPlayers}`
         });
     }
@@ -863,7 +863,7 @@ async function sendAdvanceMessage(message, tournament, result) {
         const winner = await formatUser(message.guild, result.winner);
         return replyEmbed(message, new EmbedBuilder()
             .setColor(EMBED_COLOR)
-            .setTitle("🏆🏆 Tournament Complete!")
+            .setTitle("Tournament Complete!")
             .setDescription(`**${tournament.name}** has been completed.`)
             .addFields(
                 { name: "Winner", value: winner, inline: false },
@@ -874,8 +874,8 @@ async function sendAdvanceMessage(message, tournament, result) {
     }
     if (result.type === "nextRound") {
         const lines = await Promise.all(result.matches.map(match => formatMatch(message.guild, match)));
-        const pages = buildPagesFromLines(lines, `🔥 ${tournament.name} — Round ${result.round}`);
-        pages[0].description = `🔥 **Round ${result.round} is starting!**\n\n${pages[0].description}`;
+        const pages = buildPagesFromLines(lines, `${tournament.name} - Round ${result.round}`);
+        pages[0].description = `**Round ${result.round} is starting!**\n\n${pages[0].description}`;
         pages[pages.length - 1].description += "\n\nHost: use `!match result <match_id> @winner` when a match finishes.";
         return sendEmbedPages(message, pages);
     }
@@ -921,7 +921,7 @@ async function matchResult(message, args) {
     const winner = await formatUser(message.guild, winnerId);
     await replyEmbed(message, new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle("🏆 Match Result Recorded")
+        .setTitle("Match Result Recorded")
         .setDescription(`Match \`${matchId}\` has been completed.`)
         .addFields(
             { name: "Winner", value: winner, inline: false },
@@ -969,11 +969,11 @@ async function restartMatch(message, args) {
     const [player1, player2] = await formatUsers(message.guild, [match.player1, match.player2]);
     return replyEmbed(message, new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle("🔄 Match Restarted")
+        .setTitle("Match Restarted")
         .setDescription(`Match \`${matchId}\` has been reset.`)
         .addFields(
             { name: "Players", value: `${player1} vs ${player2}`, inline: false },
-            { name: "Status", value: "⏳ Pending", inline: true }
+            { name: "Status", value: "Pending", inline: true }
         )
         .setTimestamp()
     );
@@ -1170,7 +1170,7 @@ client.on("messageCreate", async message => {
                 if (!subcommand) {
                     return replyEmbed(message, new EmbedBuilder()
                         .setColor(EMBED_COLOR)
-                        .setTitle("🏆 Tournament Commands")
+                        .setTitle("Tournament Commands")
                         .setDescription([
                             "`!tournament create <max_players> <name>`",
                             "`!tournament register <tournament_id> [@player]`",
@@ -1211,7 +1211,7 @@ client.on("messageCreate", async message => {
                 if (!subcommand) {
                     return replyEmbed(message, new EmbedBuilder()
                         .setColor(EMBED_COLOR)
-                        .setTitle("⚔️ Match Commands")
+                        .setTitle("Match Commands")
                         .setDescription(["`!match result <match_id> @winner`", "`!match restart <match_id>`"].join("\n"))
                         .setTimestamp()
                     );
