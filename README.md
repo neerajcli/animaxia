@@ -1,4 +1,4 @@
-# Animaxia — A Levelling System Based Discord Bot
+# Animaxia — A Levelling & Tournament System Based Discord Bot
 
 Animaxia is a lightweight and extensible **Discord bot** built using **Discord.js**.  
 It features a levelling system that rewards user activity and encourages community engagement within the server.
