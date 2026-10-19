@@ -47,11 +47,13 @@ const TICK_INTERVAL = 60 * 1000;
 const MIN_ELIGIBLE_USERS = 2;
 const activeVCUsers = new Map();
 const guildInvites = new Map();
+const guildVanityUses = new Map();
 const INVITE_TRACK_GUILD_ID = '498898363350253569';
 const INVITE_LOG_CHANNEL_ID = '522005174076833792';
 const PREFIX = "!";
 const EMBED_COLOR = 0x9b5cff;
 const TOURNAMENT_ORGANISER_ROLE_ID = "778855335632699432";
+const TOURNAMENT_PLAYER_ROLE_ID = "1558178150796496997";
 const EMBED_DESCRIPTION_LIMIT = 3500;
 const guildLocks = new Map();
 
@@ -235,6 +237,28 @@ async function formatUsers(guild, userIds) {
     return Promise.all(userIds.map(id => formatUser(guild, id)));
 }
 
+async function addPlayerRole(guild, userId) {
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member) return;
+    await member.roles.add(TOURNAMENT_PLAYER_ROLE_ID).catch(err => {
+        console.error(`Failed to add tournament player role to ${userId}:`, err.message);
+    });
+}
+
+async function removePlayerRole(guild, userId) {
+    const stillPlaying = await Tournament.exists({
+        guildId: guild.id,
+        status: { $in: ["registration", "registration_closed", "active"] },
+        players: userId
+    });
+    if (stillPlaying) return;
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member) return;
+    await member.roles.remove(TOURNAMENT_PLAYER_ROLE_ID).catch(err => {
+        console.error(`Failed to remove tournament player role from ${userId}:`, err.message);
+    });
+}
+
 function successEmbed(title, description) {
     return new EmbedBuilder()
         .setColor(EMBED_COLOR)
@@ -254,7 +278,7 @@ function errorEmbed(description) {
 function infoEmbed(title, description) {
     return new EmbedBuilder()
         .setColor(EMBED_COLOR)
-        .setTitle(`ℹ️ ${title}`)
+        .setTitle(`${title}`)
         .setDescription(description)
         .setTimestamp();
 }
@@ -437,9 +461,7 @@ async function createTournament(message, args) {
             { name: "Tournament ID", value: `\`${tournamentId}\``, inline: true },
             { name: "Host", value: host, inline: true },
             { name: "Players", value: `0/${maxPlayers}`, inline: true },
-            { name: "Registration", value: `Use \`!tournament register ${tournamentId}\``, inline: false },
-            { name: "Host Registration", value: `Use \`!tournament register ${tournamentId} @player\``, inline: false },
-            { name: "Start", value: `Use \`!tournament start ${tournamentId}\``, inline: false }
+            { name: "Registration", value: `Use \`!tournament register ${tournamentId}\``, inline: false }
         )
         .setTimestamp();
     return replyEmbed(message, embed);
@@ -482,6 +504,7 @@ async function registerPlayer(message, args) {
     }
     tournament.players.push(playerId);
     await saveTournament(tournament);
+    await addPlayerRole(message.guild, playerId);
     const user = await formatUser(message.guild, playerId);
     return replyEmbed(message, successEmbed(
         "Player Registered",
@@ -503,6 +526,7 @@ async function leaveTournament(message, args) {
     }
     tournament.players = tournament.players.filter(p => p !== message.author.id);
     await saveTournament(tournament);
+    await removePlayerRole(message.guild, message.author.id);
     return replyEmbed(message, successEmbed(
         "Left Tournament",
         `You have left **${tournament.name}**.\n\nPlayers: **${tournament.players.length}/${tournament.maxPlayers}**`
@@ -649,6 +673,7 @@ async function disqualifyPlayer(message, args) {
         tournament.players = tournament.players.filter(p => p !== playerId);
         tournament.disqualified.push(playerId);
         await saveTournament(tournament);
+        await removePlayerRole(message.guild, playerId);
         return replyEmbed(message, new EmbedBuilder()
             .setColor(EMBED_COLOR)
             .setTitle("Participant Disqualified")
@@ -676,6 +701,7 @@ async function disqualifyPlayer(message, args) {
     playerMatch.resultType = "disqualification";
     playerMatch.completedAt = Date.now();
     await saveTournament(tournament);
+    await removePlayerRole(message.guild, playerId);
     const opponentText = opponentId
         ? `\n\n${await formatUser(message.guild, opponentId)} automatically advances.`
         : "";
@@ -689,6 +715,90 @@ async function disqualifyPlayer(message, args) {
     const result = await advanceTournament(tournament);
     if (!result) return;
     return sendAdvanceMessage(message, tournament, result);
+}
+
+async function swapPlayer(message, args) {
+    if (args.length < 3) {
+        return replyEmbed(message, errorEmbed(
+            "Usage: `!tournament swap <tournament_id> @player1 @player2`\n\nPlayer 1 is removed and Player 2 takes their place."
+        ));
+    }
+    const outId = getUserIdFromMention(args[1]);
+    const inId = getUserIdFromMention(args[2]);
+    if (!outId || !inId) {
+        return replyEmbed(message, errorEmbed("Please mention both players."));
+    }
+    const tournament = await getTournament(message.guild.id, args[0].toUpperCase());
+    if (!tournament) return replyEmbed(message, errorEmbed("Tournament not found."));
+    if (tournament.hostId !== message.author.id) {
+        return replyEmbed(message, errorEmbed("Only the tournament host can swap players."));
+    }
+    if (tournament.status === "completed") {
+        return replyEmbed(message, errorEmbed("This tournament has already been completed."));
+    }
+    if (tournament.status === "cancelled") {
+        return replyEmbed(message, errorEmbed("This tournament has been cancelled."));
+    }
+    if (outId === inId) {
+        return replyEmbed(message, errorEmbed("Player 1 and Player 2 must be different users."));
+    }
+    if (!tournament.players.includes(outId)) {
+        return replyEmbed(message, errorEmbed("Player 1 is not a participant in this tournament."));
+    }
+    if (tournament.players.includes(inId)) {
+        return replyEmbed(message, errorEmbed("Player 2 is already registered in this tournament."));
+    }
+    if (tournament.disqualified?.includes(inId)) {
+        return replyEmbed(message, errorEmbed("Player 2 has been disqualified from this tournament and cannot be added."));
+    }
+    const inMember = await message.guild.members.fetch(inId).catch(() => null);
+    if (!inMember) {
+        return replyEmbed(message, errorEmbed("Player 2 is not in this server."));
+    }
+    if (inMember.user.bot) {
+        return replyEmbed(message, errorEmbed("Bots cannot be added to a tournament."));
+    }
+    let affectedMatch = null;
+    if (tournament.status === "active") {
+        const currentMatches = getRoundMatches(tournament, tournament.currentRound);
+        const playerMatch = currentMatches.find(m => m.player1 === outId || m.player2 === outId);
+        if (!playerMatch) {
+            return replyEmbed(message, errorEmbed("Player 1 does not have a match in the current round."));
+        }
+        if (playerMatch.status === "completed" && playerMatch.resultType !== "bye") {
+            return replyEmbed(message, errorEmbed(
+                `Match \`${playerMatch.id}\` has already been completed.\n\n` +
+                "A completed match cannot be changed by a swap."
+            ));
+        }
+        if (playerMatch.player1 === outId) {
+            playerMatch.player1 = inId;
+        } else {
+            playerMatch.player2 = inId;
+        }
+        if (playerMatch.resultType === "bye") {
+            playerMatch.winner = inId;
+        }
+        affectedMatch = playerMatch;
+    }
+    tournament.players = tournament.players.map(p => p === outId ? inId : p);
+    await saveTournament(tournament);
+    await removePlayerRole(message.guild, outId);
+    await addPlayerRole(message.guild, inId);
+    const [outUser, inUser] = await formatUsers(message.guild, [outId, inId]);
+    const embed = new EmbedBuilder()
+        .setColor(EMBED_COLOR)
+        .setTitle("Player Swapped")
+        .setDescription(`**${tournament.name}**`)
+        .addFields(
+            { name: "Removed", value: outUser, inline: true },
+            { name: "Added", value: inUser, inline: true }
+        )
+        .setTimestamp();
+    if (affectedMatch) {
+        embed.addFields({ name: "Updated Match", value: await formatMatch(message.guild, affectedMatch), inline: false });
+    }
+    return replyEmbed(message, embed);
 }
 
 async function myMatch(message, args) {
@@ -1117,8 +1227,8 @@ async function getBackgroundImage() {
 }
 
 const app = express();
-app.listen(15341, "0.0.0.0", () => {
-    console.log("Webhook server running on port 15341");
+app.listen(9571, "0.0.0.0", () => {
+    console.log("Webhook server running on port 9571");
 });
 app.post("/topgg", express.json(), async (req, res) => {
     const sig = req.headers["x-topgg-signature"];
@@ -1153,6 +1263,8 @@ client.on('clientReady', async () => {
         } catch (err) {
             console.error('Failed to cache invites on ready:', err.message);
         }
+        const vanity = await guild.fetchVanityData().catch(() => null);
+        if (vanity) guildVanityUses.set(guild.id, vanity.uses);
     }
     console.log('Bot is ready');
     client.user.setActivity(`Inside the AGG universe!`, { type: ActivityType.Playing });
@@ -1180,6 +1292,7 @@ client.on("messageCreate", async message => {
                             "`!tournament list`",
                             "`!tournament participants <tournament_id>`",
                             "`!tournament disqualify <tournament_id> @player`",
+                            "`!tournament swap <tournament_id> @player1 @player2`",
                             "`!tournament brackets <tournament_id>`",
                             "`!tournament mymatch <tournament_id>`",
                             "`!tournament history`",
@@ -1198,6 +1311,7 @@ client.on("messageCreate", async message => {
                     case "list": return listTournaments(message);
                     case "participants": return showParticipants(message, parts);
                     case "disqualify": return disqualifyPlayer(message, parts);
+                    case "swap": return swapPlayer(message, parts);
                     case "brackets": return showBrackets(message, parts);
                     case "mymatch": return myMatch(message, parts);
                     case "history": return tournamentHistory(message);
@@ -1636,6 +1750,11 @@ client.on('guildMemberAdd', async member => {
     } else {
         console.error(`Welcome channel ${WELCOME_CHANNEL_ID} not found in guild ${member.guild.id}`);
     }
+    try {
+        await member.send(
+            `Welcome to Anime Gaming Galaxy. Please visit <#623176341830762526> to verify yourself and get access to the server.`
+        );
+    } catch (err) { console.error(`Failed to DM welcome message to ${member.tag}:`, err); }
     const pingStatus = await getGhostPing(member.guild.id);
     if (pingStatus == 1) {
         const eventchannel = member.guild.channels.cache.get("510673955560882226");
@@ -1657,11 +1776,22 @@ client.on('guildMemberAdd', async member => {
                 return inv.uses > cachedUses;
             });
             guildInvites.set(member.guild.id, new Map(newInvites.map(inv => [inv.code, inv.uses])));
+            let usedVanity = null;
+            if (!usedInvite) {
+                const vanity = await member.guild.fetchVanityData().catch(() => null);
+                if (vanity) {
+                    const cachedVanityUses = guildVanityUses.get(member.guild.id) ?? vanity.uses;
+                    if (vanity.uses > cachedVanityUses) usedVanity = vanity;
+                    guildVanityUses.set(member.guild.id, vanity.uses);
+                }
+            }
             const logChannel = member.guild.channels.cache.get(INVITE_LOG_CHANNEL_ID);
             if (logChannel) {
                 let description;
                 if (usedInvite && usedInvite.inviter) {
                     description = `\`${member.user.tag}\` (\`${member.id}\`) joined the server using **${usedInvite.code}**, which was created by \`${usedInvite.inviter.tag}\` (\`${usedInvite.inviter.id}\`). This invite has **${usedInvite.uses}** uses.`;
+                } else if (usedVanity) {
+                    description = `\`${member.user.tag}\` (\`${member.id}\`) joined the server using the vanity URL **${usedVanity.code}**. The vanity URL has **${usedVanity.uses}** uses.`;
                 } else {
                     description = `\`${member.user.tag}\` (\`${member.id}\`) joined the server, but the invite used could not be determined.`;
                 }
